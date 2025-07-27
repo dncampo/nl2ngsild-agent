@@ -1,6 +1,0 @@
-[fiware]
-host=localhost
-port=1026
-[openai]
-api_key=<your-openai-api-key>
- 
