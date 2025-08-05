@@ -1,0 +1,5 @@
+what animals belong to "Old MacDonald"?
+Give me a list of names and weights of all animals weighting less than 100 KG.
+what is the youngest animal?
+what is the name of the oldest animal?
+what animals needs to visit the vet?

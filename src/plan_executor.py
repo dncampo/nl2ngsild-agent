@@ -2,9 +2,8 @@ import time
 import logging
 from typing import Dict, List
 from dag_node import DAGNode
-# We would have a fiware_client here as in the previous version
-# from fiware_client import FiwareClient
-
+from fiware_client import FiwareClient
+import openai
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,7 @@ class PlanExecutor:
         logger.info(f"PlanExecutor initialized to connect to FIWARE at {fiware_host}:{fiware_port}")
         pass
 
-    def execute_dag(self, dag_nodes_structure: Dict[str, List[str]], nodes: Dict[str, DAGNode]):
+    def execute_dag(self, dag_nodes_structure: Dict[str, List[str]], nodes: Dict[str, DAGNode], fiware_host: str, fiware_port: int, user_task: str):
         """
         Executes the DAG in topological order.
 
@@ -27,58 +26,106 @@ class PlanExecutor:
             dag_structure: The adjacency list of the DAG.
             nodes: A dictionary of DAGNode objects with populated details.
         """
-        dag_structure = dag_nodes_structure['dag']
         logger.info("\n--- Starting DAG Execution ---")
         # Simple topological sort (assumes no cycles)
-        in_degree = {u: 0 for u in dag_structure}
-        for u in dag_structure:
-            for v in dag_structure[u]:
-                in_degree[v] += 1
+        in_degree = {u: 0 for u in dag_nodes_structure}
+        for u in dag_nodes_structure:
+            in_degree[u] = len(dag_nodes_structure[u]['depends'])
+        logger.info(f"In degree: {in_degree}")
 
-        queue = [u for u in dag_structure if in_degree[u] == 0]
-        execution_order = []
-        while queue:
-            u = queue.pop(0)
-            execution_order.append(u)
-            for v in dag_structure[u]:
-                in_degree[v] -= 1
-                if in_degree[v] == 0:
-                    queue.append(v)
+        # Create an adjacency matrix from the adjacency list (dag_nodes_structure)
+        node_ids = list(dag_nodes_structure.keys())
+        node_index = {node_id: idx for idx, node_id in enumerate(node_ids)}
+        n = len(node_ids)
+        adjacency_matrix = [[0 for _ in range(n)] for _ in range(n)]
+        for u in dag_nodes_structure:
+            for v in dag_nodes_structure[u]['depends']:
+                i = node_index[u]
+                j = node_index[v]
+                adjacency_matrix[j][i] = 1
+        logger.info("Adjacency Matrix:")
+        for row in adjacency_matrix:
+            logger.info(row)
 
-        logger.info(f"Execution Order: {execution_order}")
+        # Perform topological sort using the adjacency matrix
+        # We'll use Kahn's algorithm, but with the adjacency matrix for reference
 
-        nodes_details = dag_nodes_structure['nodes']
-        for node_id in execution_order:
-            node.id = nodes[node_id]
-            node.description = nodes_details[node_id]['description']
-            node.atomic = nodes_details[node_id]['atomic']
-            node.query = nodes_details[node_id]['query']
-            node.status = "running"
-            logger.info(f"\nExecuting Node: {node.id} ('{node.goal_description}')")
+        # Compute in-degree from adjacency matrix
+        in_degree_matrix = [0] * n
+        for j in range(n):
+            for i in range(n):
+                if adjacency_matrix[i][j]:
+                    in_degree_matrix[j] += 1
 
-            # Here you would add the logic to interact with the FIWARE Context Broker
-            # based on the node's goal. This is where you'd call the LLM to generate
-            # the specific NGSI-LD query for this node's sub-task.
+        # Map index back to node_id
+        index_to_node_id = {idx: node_id for node_id, idx in node_index.items()}
 
-            # --- Placeholder for FIWARE interaction ---
-            try:
-                logger.info(f"  > Simulating interaction with FIWARE Context Broker...")
-                time.sleep(1) # Simulate network latency
-                # In a real scenario, you'd generate and execute a query here.
-                # The result would be stored in node.output_data
-                node.output_data = {"result": f"Data for node {node.id}"}
-                node.status = "completed"
-                logger.info(f"  > Node {node.id} completed successfully.")
-            except Exception as e:
-                node.status = "failed"
-                node.error = str(e)
-                logger.error(f"  > Node {node.id} failed: {node.error}")
-                # Here you could trigger a re-planning step for this specific node.
-                # The re-planning would take the error into account.
-                break # Stop execution on failure for this simple scaffold
+        # Initialize queue with nodes of in-degree 0
+        topo_queue = [idx for idx, deg in enumerate(in_degree_matrix) if deg == 0]
+        topo_order = []
+        in_degree_matrix_copy = in_degree_matrix[:]
+        adjacency_matrix_copy = [row[:] for row in adjacency_matrix]
 
+        while topo_queue:
+            u_idx = topo_queue.pop(0)
+            topo_order.append(index_to_node_id[u_idx])
+            for v_idx in range(n):
+                if adjacency_matrix_copy[u_idx][v_idx]:
+                    in_degree_matrix_copy[v_idx] -= 1
+                    if in_degree_matrix_copy[v_idx] == 0:
+                        topo_queue.append(v_idx)
+
+        logger.info(f"Topological order from adjacency matrix: {topo_order}")
+
+
+        for node_id in topo_order:
+            logger.info(f"Executing Node: {node_id}")
+            node_details = dag_nodes_structure[node_id]
+            logger.info(f"Node details: {node_details}")
+            if node_details['atomic']:
+                fiware_client = FiwareClient( fiware_host, fiware_port )
+                logger.info(f"  > FIWARE client initialized")
+                response = fiware_client.get_entities(node_details['query'])
+                dag_nodes_structure[node_id]['output'] = response
+                logger.info(f"  > Response: {response}")
+                logger.info(f"  > Node {node_id} is atomic. Executing query: {node_details['query']}")
+                previous_output = response
+            else:
+                logger.info(f"  > Node {node_id} is not atomic. Call LLM to solve this sub step.")
+                # Compose prompt for LLM
+                prompt = node_details.get('description', f"Process step: {node_id}")
+                # Use previous_output as context
+                # Replace the following line with your actual LLM call
+                # For example: llm_response = self.llm(prompt, previous_output)
+                # Here, we'll just mock the LLM call for demonstration
+                new_prompt = f"current task step is: {prompt} with context from information gathered from the previous step: {previous_output}. The original task is: {user_task} and the previous output is the context of the previous node and you should use it to solve this actual step. The whole plan is: {dag_nodes_structure}"
+                try:
+                    openai_client = openai.OpenAI(api_key=openai.api_key)
+                    response = openai_client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[
+                        {"role": "system", "content": "You are an expert FIWARE agent executor. You should solve the following task whereas the previous output is the context of the previous node and you should use it to solve this actual step."},
+                        {"role": "user", "content": new_prompt}
+                    ]
+                    )
+                    logger.debug(f"created chat with OpenAI")
+                    dag_structure_str = response.choices[0].message.content
+                    logger.info(f"-----------------------------")
+                    logger.info(f"Generated DAG Structure: {dag_structure_str}")
+                    logger.info(f"-----------------------------")
+                    llm_response = dag_structure_str
+                except Exception as e:
+                    logger.error(f"Error creating DAG plan: {e}")
+                    return {}
+
+                dag_nodes_structure[node_id]['output'] = llm_response
+                logger.info(f"  > LLM response: {llm_response}")
+                previous_output = llm_response
+
+
+
+        logger.info(f"DAG nodes structure: {dag_nodes_structure}")
+        logger.info(f"result of the last node: {dag_nodes_structure[topo_order[-1]]['output']}")
         logger.info("\n--- DAG Execution Finished ---")
-        final_output_node_id = execution_order[-1]
-        final_result = nodes[final_output_node_id].output_data
-        logger.info(f"Final Result from node '{final_output_node_id}': {final_result}")
-        return final_result
+
+        return dag_nodes_structure[topo_order[-1]]['output']

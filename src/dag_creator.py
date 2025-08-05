@@ -15,7 +15,7 @@ class DAGCreator:
     def __init__(self, openai_api_key: str):
         openai.api_key = openai_api_key
 
-    def create_dag_plan(self, user_task: str, data_models: Dict) -> Dict[str, List[str]]:
+    def create_dag_plan(self, user_task: str, context: Dict) -> Dict[str, List[str]]:
         """
         Uses an LLM to generate a DAG structure in plain text/JSON.
         The DAG represents the dependencies between sub-tasks.
@@ -36,9 +36,11 @@ class DAGCreator:
         The user's task is: "{user_task}"
 
         The available FIWARE data models are:
-        {json.dumps(data_models, indent=2)}
+        {json.dumps(context['data_models'], indent=2)}
 
-        Based on the user's task, break it down into a series of smaller, dependent steps.
+        Based on the user's task, break it down into a series of smaller, dependent steps. Each step should be atomic, 
+        meaning that it can be executed as a single query to the Context Broker. If it is not atomic, you should return a prompt to the LLM 
+        to solve this sub step.
         Represent the plan as a JSON object where keys are node IDs (e.g., "a", "b", "c") and
         values are lists of node IDs that depend on the key.
         This represents a Directed Acyclic Graph (DAG).
@@ -51,26 +53,42 @@ class DAGCreator:
 
         The corresponding JSON DAG would be:
         dag: {{
-          "a": ["b"],
-          "b": ["c"],
-          "c": ["d"],
-          "d": []
+          "a": {{
+                "desciption": "Find all 'Building' entities with name 'Building 1'",
+                "depends": [],
+                "atomic": true,
+                "query": "GET http://{context['fiware_host']}:{context['fiware_port']}/ngsi-ld/v1/entities/?type=Building&q=name==%22Building%201%22"
+             }},
+          "b": {{
+                "desciption": "From the result of 'a', get the list of all associated 'Device' entities (sensors)",
+                "depends": ["a"],
+                "atomic": true,
+                "query": "GET http://{context['fiware_host']}:{context['fiware_port']}/ngsi-ld/v1/entities/?type=Device&q=building==%22Building%201%22"
+          }},
+          "c": {{
+                "desciption": "For each sensor from 'b', get its 'Temperature' reading",
+                "depends": ["b"],
+                "atomic": true,
+                "query": "GET http://{context['fiware_host']}:{context['fiware_port']}/ngsi-ld/v1/entities/?type=Device&q=name==%22Sensor%201%22&attrs=temperature"
+          }},
+          "d": {{
+                "desciption": "Calculate the average of all temperatures from 'c'",
+                "depends": ["c"],
+                "atomic": true,
+                "query": "GET http://{context['fiware_host']}:{context['fiware_port']}/ngsi-ld/v1/entities/?type=Device&q=name==%22Sensor%201%22&attrs=temperature"
+          }}
         }}
-        
-        Besides to the DAG, you should return the description of each node in the DAG  with the following elements:
-        nodes: {{
-            description (short string): A human-readable description of the step.
-            atomic (bool): A boolean value that indicates if the step is atomic or not. If it is atomic, it means that the step is a single query, ready to be executed against the Context Broker with requests.
-            query (string): Argument of the python requests method to query the CB in the form of a NGSI-LD query if this is atomic, or the new prompt to ask to the LLM to solve this sub step.
-        }}
-        
+
+        In the field "depends" you should only include the node IDs that are necessary to execute the step.
+
+
         Try to create a DAG with the minimum amount of steps possible and the maximum amount of atomic steps possible. Just explicitly explain the reasoning process to create the DAG and devise a plan that once the DAG is linearly executed, it will lead to the user's goal.  
 
-        Return ONLY the JSON object representing the DAG in dag and nodes.
+        Return ONLY the JSON object representing the DAG in dag.
         The outout SHOULD BE in JSON format. Do not include any other text or comments nor characters. NO markdown please.
-        
+
         If you find that one of the intermediary steps of the DAG plan are atomic and directly solvable performing a query to the FIWARE Context Broker, you can use the following rationale:
-        you always think about what are the entity types and attributes names that need to be queried, in order to perform a non malformed query. For doing so, you have to see the context taking the 
+        you always think about what are the entity types and attributes names that need to be queried, in order to perform a non malformed query. For doing so, you have to see the context taking the
         context file and checking for data types and attribute names. For certain entity types, you will find the defined term followed by a link. You follow this link to find the definition
         of this entity type on a repository and further check their attributes. Here is an example: if someone wants to know about the health of the cow named Bumble, you might find that the context file
         has a definition of type Animal, which is defined in "agrifood": "https://smartdatamodels.org/dataModel.Agrifood/". Moreover, if you follow this link about Agrifood you will find a repository having 
@@ -83,13 +101,18 @@ class DAGCreator:
         something like GET http://<CB_ADDRESS>:<CB_PORT>/ngsi-ld/v1/entities/?type=Animal&q=name==%22Bumble%22&attrs=healthCondition. 
         In other cases it might be needed to use a particular context file for this query, adding something like 'Link: <http://context/user-context.jsonld>; rel=http://www.w3.org/ns/json-ld#context; type=application/ld+json' in the header of the request.
         Adding this last one, the query will be executed using the user-context.jsonld file. Most of the cases it is better to get beforehand information about this, or asking the user, because the file used could be with any name.
-        
-        This is just an example, so you need to ALWAYS navigate the graph of context and SDM data types to find the entity types and attributes names. 
+
+        This is just an example, so you need to ALWAYS navigate the graph of context and SDM data types to find the entity types and attributes names.
         Somethimes the attribute that relates an entity to another entity is not a simple attribute, but a relationship. In this case, you need to find the entity type of the related entity and the attribute that relates the two entities. In other cases
         you have a third entity that relates other two entities. For example, if an entity has the attributes calvedBy and SiredBy, we can infer the values of these two attributes relate two other entities as reproductive partners.
         So, for certain cases, you need to investigate the context and SDM to follow and understand the relationships between entities. In other cases, you might need to query some entities to receive more context and information to continue your reasoning. It might
         be hard in some cases, but a good rule of thumb is to always query the context file and follow certain links of the SDM.
+
+        For the GET request, you should just send the query that will be send to the python package requests.
+        Please, do not change any proper name. Some names might contain spaces, so you should use the %22 symbol to escape them.
         """
+        #You should avoid retrieving all the entities of a type, because it is not efficient and it is not necessary.
+        #When possible, use filters to retrieve only the entities that you need and use the sort, limit and offset parameters to retrieve only the entities that you need.
 
         try:
             openai_client = openai.OpenAI(api_key=openai.api_key)
@@ -116,16 +139,15 @@ class DAGCreator:
         """
         # This would be another LLM call to define the goal for each node.
         # For this scaffold, we'll create placeholder nodes.
-        return dag_nodes_structure['dag']
-    
+        return dag_nodes_structure
+
         logger.info("Populating DAG node details...")
         nodes = {}
         logger.info(f"***************")
-        logger.info(f"dag_nodes_structure: {dag_nodes_structure['dag']}")
-        logger.info(f"***************")   
-        dag_structure = dag_nodes_structure['dag']
+        logger.info(f"dag_nodes_structure: {dag_nodes_structure}")
+        logger.info(f"***************")
 
-        for node_id in dag_structure.keys():
+        for node_id in dag_nodes_structure.keys():
             logger.info(f"node_id: {node_id}")
 
             # In a real implementation, the goal would be generated by an LLM based on the node's position in the graph.

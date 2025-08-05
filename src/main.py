@@ -38,7 +38,7 @@ def main():
     )
     logger = logging.getLogger(__name__)
     logger.info("Starting NGSI-LD Agent")
-    
+
     config = configparser.ConfigParser()
     config.read('config.ini')
     openai_api_key = config.get('openai', 'api_key')
@@ -63,12 +63,23 @@ def main():
     plan_executor = PlanExecutor(fiware_host, fiware_port)
 
     # 3. Get user task
-    logger.info("Waiting for user input")
-    user_task = input("Please enter your task: ")
+    try:
+        user_task_path = os.path.join('tasks', 'user_task.txt')
+        logger.info(f"Attempting to read user task from '{user_task_path}'")
+        with open(user_task_path, 'r') as f:
+            user_task = f.readline().strip()
+        logger.info(f"User task read from file: {user_task}")
+    except FileNotFoundError:
+        user_task = ""
+
+    if not user_task:
+        logger.info("No user task found in file. Waiting for user input.")
+        user_task = input("Please enter your task: ")
+
     logger.info(f"Received query: {user_task}")
 
     # 4. Create the DAG plan structure
-    dag_structure = dag_creator.create_dag_plan(user_task, data_models)
+    dag_structure = dag_creator.create_dag_plan(user_task, {"data_models": data_models, "fiware_host": fiware_host, "fiware_port": fiware_port})
     if not dag_structure:
         logger.info("Could not create a valid DAG structure. Exiting.")
         logger.error("the dag_structure is: " + json.dumps(dag_structure, indent=2))
@@ -81,7 +92,7 @@ def main():
 
     # 6. Execute the plan
     logger.info("Executing the plan")
-    #plan_executor.execute_dag(dag_structure, nodes)
+    plan_executor.execute_dag(dag_structure, nodes, fiware_host, fiware_port, user_task)
     logger.info("Execution completed")
 
 
