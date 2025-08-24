@@ -3,6 +3,7 @@ import logging
 from typing import Dict, List
 from dag_node import DAGNode
 from fiware_client import FiwareClient
+from dag_creator import DAGCreator
 import openai
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ class PlanExecutor:
         logger.info(f"PlanExecutor initialized to connect to FIWARE at {fiware_host}:{fiware_port}")
         pass
 
-    def execute_dag(self, dag_nodes_structure: Dict[str, List[str]], nodes: Dict[str, DAGNode], fiware_host: str, fiware_port: int, user_task: str):
+    def execute_dag(self, dag_nodes_structure: Dict[str, List[str]], nodes: Dict[str, DAGNode], fiware_host: str, fiware_port: int, user_task: str, dag_creator: DAGCreator):
         """
         Executes the DAG in topological order.
 
@@ -79,17 +80,19 @@ class PlanExecutor:
 
 
         for node_id in topo_order:
+            fiware_client = FiwareClient( fiware_host, fiware_port )
+
             logger.info(f"Executing Node: {node_id}")
             node_details = dag_nodes_structure[node_id]
             logger.info(f"Node details: {node_details}")
             if node_details['atomic']:
-                fiware_client = FiwareClient( fiware_host, fiware_port )
                 logger.info(f"  > FIWARE client initialized")
-                response = fiware_client.get_entities(node_details['query'])
+                response = fiware_client.execute_query(node_details['query'])
                 dag_nodes_structure[node_id]['output'] = response
                 logger.info(f"  > Response: {response}")
                 logger.info(f"  > Node {node_id} is atomic. Executing query: {node_details['query']}")
                 previous_output = response
+
             else:
                 logger.info(f"  > Node {node_id} is not atomic. Call LLM to solve this sub step.")
                 # Compose prompt for LLM
@@ -98,31 +101,30 @@ class PlanExecutor:
                 # Replace the following line with your actual LLM call
                 # For example: llm_response = self.llm(prompt, previous_output)
                 # Here, we'll just mock the LLM call for demonstration
-                new_prompt = f"current task step is: {prompt} with context from information gathered from the previous step: {previous_output}. The original task is: {user_task} and the previous output is the context of the previous node and you should use it to solve this actual step. The whole plan is: {dag_nodes_structure}"
+                new_prompt = f"current task step is: {prompt} with context from information gathered from the previous step: {previous_output}. The original task is: {user_task} and the previous output is the context of the previous node and you should use it to solve this actual step. The whole plan is: {dag_nodes_structure}. Give me an atomic step to directly query the context broker."
+                logger.info(f"  > Prompt to LLM: {new_prompt}")
                 try:
-                    openai_client = openai.OpenAI(api_key=openai.api_key)
-                    response = openai_client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[
-                        {"role": "system", "content": "You are an expert FIWARE agent executor. You should solve the following task whereas the previous output is the context of the previous node and you should use it to solve this actual step."},
-                        {"role": "user", "content": new_prompt}
-                    ]
-                    )
-                    logger.debug(f"created chat with OpenAI")
-                    dag_structure_str = response.choices[0].message.content
-                    logger.info(f"-----------------------------")
-                    logger.info(f"Generated DAG Structure: {dag_structure_str}")
-                    logger.info(f"-----------------------------")
-                    llm_response = dag_structure_str
+                    llm_response = dag_creator.send_message_to_llm(new_prompt)
+                    response_CB = fiware_client.execute_query(llm_response)
+                    dag_nodes_structure[node_id]['output'] = response_CB
+                    logger.info(f"  > Response from CB: {response_CB}")
+                    previous_output = response_CB
                 except Exception as e:
-                    logger.error(f"Error creating DAG plan: {e}")
+                    logger.error(f"Error creating DAG plan: {e}. Returning empty dictionary.")
                     return {}
 
                 dag_nodes_structure[node_id]['output'] = llm_response
                 logger.info(f"  > LLM response: {llm_response}")
                 previous_output = llm_response
 
-
+            message_to_llm = "Given the step: " + str(node_details) + \
+                    " .The output from the context broker is: " + str(previous_output) + \
+                    ". If this is an error, probably we need to redo this step. If the resultset is empty, it could be a malformed query that wrongly queried the attribute. Anyway, if there is some data you might use it to solve the next step. Check if the ID or other attribute is used in the next step."
+            logger.info(f"  > Message to LLM: {message_to_llm}")
+            llm_response = dag_creator.send_message_to_llm(message_to_llm)
+            dag_nodes_structure[node_id]['output'] = llm_response
+            logger.info(f"  > LLM response: {llm_response}")
+            previous_output = llm_response
 
         logger.info(f"DAG nodes structure: {dag_nodes_structure}")
         logger.info(f"result of the last node: {dag_nodes_structure[topo_order[-1]]['output']}")

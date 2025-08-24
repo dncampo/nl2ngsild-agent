@@ -2,18 +2,40 @@ import json
 import logging
 from typing import Dict, List
 import openai
+import time
 from dag_node import DAGNode
 
 logger = logging.getLogger(__name__)
 
 class DAGCreator:
     """
-    Creates a Directed Acyclic Graph (DAG) plan based on the user's task.
-    This component is responsible for breaking down a complex task into smaller,
-    manageable sub-tasks represented as nodes in a graph.
+    This class is responsible for interacting with the LLM to create a Directed Acyclic Graph (DAG) plan based on the user's task.
+    It uses the OpenAI API to create an assistant and a thread to store the conversation history.
+    Creates an interface to interact with the LLM.
     """
     def __init__(self, openai_api_key: str):
-        openai.api_key = openai_api_key
+        try:
+            self.client = openai.OpenAI(api_key=openai_api_key)
+            self.assistant = self.client.beta.assistants.create(
+                name="DAG Creator",
+                instructions="You are an AI planner that helps to create plans to query a FIWARE Context Broker. You design a DAG to solve the user's task. Each node of the DAG is a step to solve the user's task. Each node has a description, a boolean indicating if it is atomic or not and a query to the Context Broker.",
+                model="gpt-4.1-mini"
+            )
+            self.thread = self.client.beta.threads.create()
+            run = self.client.beta.threads.runs.create(
+                thread_id=self.thread.id,
+                assistant_id=self.assistant.id,
+                instructions="Create a plan to retrieve the requested information from the user."
+            )
+            while run.status in ["queued", "in_progress"]:
+                time.sleep(0.5)
+                run = self.client.beta.threads.runs.retrieve(thread_id=self.thread.id, run_id=run.id)
+                logger.info(f"Run status: {run.status}")
+
+        except Exception as e:
+            logger.error(f"Error creating OpenAI connection: {e}")
+            raise e
+        return
 
     def create_dag_plan(self, user_task: str, context: Dict) -> Dict[str, List[str]]:
         """
@@ -115,23 +137,101 @@ class DAGCreator:
         #When possible, use filters to retrieve only the entities that you need and use the sort, limit and offset parameters to retrieve only the entities that you need.
 
         try:
-            openai_client = openai.OpenAI(api_key=openai.api_key)
-            response = openai_client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_task}
-            ]
+            logger.info(f"Ask user question to LLM")
+            # Create a message with user's task
+            thread_message = self.client.beta.threads.messages.create(
+                thread_id=self.thread.id,
+                role="user",
+                content=prompt,
             )
-            logger.debug(f"created chat with OpenAI")
-            dag_structure_str = response.choices[0].message.content
-            logger.info(f"-----------------------------")
-            logger.info(f"Generated DAG Structure: {dag_structure_str}")
-            logger.info(f"-----------------------------")
-            return json.loads(dag_structure_str)
+
+            # Run the Assistant
+            my_run = self.client.beta.threads.runs.create(
+                thread_id=self.thread.id,
+                assistant_id=self.assistant.id,
+                instructions="Please, return the DAG structure in JSON format. Do not include any other text or comments nor characters. NO markdown please."
+            )
+
+            # Periodically retrieve the Run to check on its status to see if it has moved to completed
+            while my_run.status in ["queued", "in_progress"]:
+                keep_retrieving_run = self.client.beta.threads.runs.retrieve(
+                    thread_id=self.thread.id,
+                    run_id=my_run.id
+                )
+                logger.info(f"Run status: {keep_retrieving_run.status}")
+                time.sleep(1)
+
+                if keep_retrieving_run.status == "completed":
+                    logger.info("Completed\n")
+
+                    # Step 6: Retrieve the Messages added by the Assistant to the Thread
+                    all_messages = self.client.beta.threads.messages.list(
+                        thread_id=self.thread.id
+                    )
+                    logger.info("------------------------------------------------------------ \n")
+                    logger.info(f"User: {thread_message.content[0].text.value}")
+                    logger.info(f"Assistant: {all_messages.data[0].content[0].text.value}")
+                    break
+                elif keep_retrieving_run.status == "queued" or keep_retrieving_run.status == "in_progress":
+                    pass
+                else:
+                    logger.info(f"Run status: {keep_retrieving_run.status}")
+                    break
+            return json.loads(all_messages.data[0].content[0].text.value)
         except Exception as e:
             logger.error(f"Error creating DAG plan: {e}")
             return {}
+
+
+    def send_message_to_llm(self, message: str) -> str:
+        """
+        Sends a message to the LLM. Probably the result of a previous node, or a CB's response.
+        """
+        try:
+            logger.info(f"Ask user question to LLM")
+            # Create a message with user's task
+            thread_message = self.client.beta.threads.messages.create(
+                thread_id=self.thread.id,
+                role="user",
+                content=message,
+            )
+
+            # Run the Assistant
+            my_run = self.client.beta.threads.runs.create(
+                thread_id=self.thread.id,
+                assistant_id=self.assistant.id,
+                instructions="Please, update data if this is a response or execute the query to give the answer to the user if this is a step."
+            )
+            # Periodically retrieve the Run to check on its status to see if it has moved to completed
+            while my_run.status in ["queued", "in_progress"]:
+                keep_retrieving_run = self.client.beta.threads.runs.retrieve(
+                    thread_id=self.thread.id,
+                    run_id=my_run.id
+                )
+                logger.info(f"Run status: {keep_retrieving_run.status}")
+                time.sleep(1)
+
+                if keep_retrieving_run.status == "completed":
+                    logger.info("Completed\n")
+
+                    # Step 6: Retrieve the Messages added by the Assistant to the Thread
+                    all_messages = self.client.beta.threads.messages.list(
+                        thread_id=self.thread.id
+                    )
+                    break
+                elif keep_retrieving_run.status == "queued" or keep_retrieving_run.status == "in_progress":
+                    pass
+                else:
+                    logger.info(f"Run status: {keep_retrieving_run.status}")
+                    break
+
+            logger.info(f"Assistant response to the update: {all_messages.data[0].content[0].text.value}")
+            return json.loads(all_messages.data[0].content[0].text.value)
+        except Exception as e:
+            logger.error(f"Error sending message to LLM: {e}")
+            return {}
+
+
 
     def create_node_details(self, user_task: str, dag_nodes_structure: Dict[str, List[str]]) -> Dict[str, DAGNode]:
         """

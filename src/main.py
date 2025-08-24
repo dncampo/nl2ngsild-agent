@@ -60,7 +60,7 @@ def main():
 
     # 2. Initialize components
     dag_creator = DAGCreator(openai_api_key)
-    plan_executor = PlanExecutor(fiware_host, fiware_port)
+
 
     # 3. Get user task
     try:
@@ -92,7 +92,8 @@ def main():
 
     # 6. Execute the plan
     logger.info("Executing the plan")
-    plan_executor.execute_dag(dag_structure, nodes, fiware_host, fiware_port, user_task)
+    plan_executor = PlanExecutor(fiware_host, fiware_port)
+    plan_executor.execute_dag(dag_structure, nodes, fiware_host, fiware_port, user_task, dag_creator)
     logger.info("Execution completed")
 
 

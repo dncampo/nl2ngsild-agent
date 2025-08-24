@@ -10,7 +10,7 @@ class FiwareClient:
         self.base_url = f"http://{host}:{port}"
         logger.info(f"Initialized FiwareClient with base URL: {self.base_url}")
 
-    def get_entities(self, params):
+    def execute_query(self, params):
         """
         Retrieves entities from the Context Broker.
         """
